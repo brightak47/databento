@@ -61,7 +61,7 @@ if api_key and symbol and start_date and end_date:
                 symbol=symbol,
                 start_date=start_date,
                 end_date=end_date,
-                schema="trades"
+                schema="mbo"  # Switching to Market-by-Order schema
             )
 
             # Convert to DataFrame
@@ -114,7 +114,7 @@ if data_uploaded:
         correlation = eod_data[['imbalance', 'price_change']].corr().iloc[0, 1]
         st.write(f"Correlation between Imbalance and Price Change: {correlation:.2f}")
     else:
-        st.error("The 'ts_event' column is missing in the fetched data. Unable to process end-of-day snapshots.")
+        st.error("The 'ts_event' column is missing in the fetched data. Ensure the correct schema is used or contact Databento support.")
 
 # Instructions
 if not data_uploaded:
