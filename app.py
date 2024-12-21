@@ -55,35 +55,38 @@ if data_uploaded:
     # Process Data
     st.header("Data Processing")
     
-    # Filter for end-of-day snapshot (example: based on ts_event for last event of the day)
-    data['ts_event'] = pd.to_datetime(data['ts_event'], unit='ns')
-    data['date'] = data['ts_event'].dt.date
-    eod_data = data.groupby('date').apply(lambda x: x.iloc[-1])
+    # Check for 'ts_event' column
+    if 'ts_event' in data.columns:
+        data['ts_event'] = pd.to_datetime(data['ts_event'], unit='ns')
+        data['date'] = data['ts_event'].dt.date
+        eod_data = data.groupby('date').apply(lambda x: x.iloc[-1])
 
-    # Calculate Imbalance
-    eod_data['bid_volume'] = eod_data.apply(lambda x: x['size'] if x['side'] == 'Bid' else 0, axis=1)
-    eod_data['ask_volume'] = eod_data.apply(lambda x: x['size'] if x['side'] == 'Ask' else 0, axis=1)
-    eod_data['imbalance'] = (eod_data['bid_volume'] - eod_data['ask_volume']) / (eod_data['bid_volume'] + eod_data['ask_volume'])
+        # Calculate Imbalance
+        eod_data['bid_volume'] = eod_data.apply(lambda x: x['size'] if x['side'] == 'Bid' else 0, axis=1)
+        eod_data['ask_volume'] = eod_data.apply(lambda x: x['size'] if x['side'] == 'Ask' else 0, axis=1)
+        eod_data['imbalance'] = (eod_data['bid_volume'] - eod_data['ask_volume']) / (eod_data['bid_volume'] + eod_data['ask_volume'])
 
-    # Simulate Next-Day Price Impact (Assume we have next-day open prices in data)
-    eod_data['price_change'] = eod_data['price'].pct_change()
+        # Simulate Next-Day Price Impact (Assume we have next-day open prices in data)
+        eod_data['price_change'] = eod_data['price'].pct_change()
 
-    # Display Calculated Metrics
-    st.write("End-of-Day Data with Imbalance:")
-    st.dataframe(eod_data[['date', 'imbalance', 'price_change']])
+        # Display Calculated Metrics
+        st.write("End-of-Day Data with Imbalance:")
+        st.dataframe(eod_data[['date', 'imbalance', 'price_change']])
 
-    # Visualization
-    st.header("Visualization")
+        # Visualization
+        st.header("Visualization")
 
-    # Scatter Plot - Imbalance vs. Price Change
-    st.subheader("Imbalance vs. Next-Day Price Change")
-    fig = px.scatter(eod_data, x="imbalance", y="price_change", title="Imbalance vs Price Change",
-                     labels={"imbalance": "Order Book Imbalance", "price_change": "Next-Day Price Change (%)"})
-    st.plotly_chart(fig)
+        # Scatter Plot - Imbalance vs. Price Change
+        st.subheader("Imbalance vs. Next-Day Price Change")
+        fig = px.scatter(eod_data, x="imbalance", y="price_change", title="Imbalance vs Price Change",
+                         labels={"imbalance": "Order Book Imbalance", "price_change": "Next-Day Price Change (%)"})
+        st.plotly_chart(fig)
 
-    # Correlation Analysis
-    correlation = eod_data[['imbalance', 'price_change']].corr().iloc[0, 1]
-    st.write(f"Correlation between Imbalance and Price Change: {correlation:.2f}")
+        # Correlation Analysis
+        correlation = eod_data[['imbalance', 'price_change']].corr().iloc[0, 1]
+        st.write(f"Correlation between Imbalance and Price Change: {correlation:.2f}")
+    else:
+        st.error("The 'ts_event' column is missing in the fetched data. Unable to process end-of-day snapshots.")
 
 # Instructions
 if not data_uploaded:
