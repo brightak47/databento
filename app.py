@@ -36,8 +36,7 @@ if api_key and symbol and start_date and end_date:
                 symbols=[symbol],
                 schema="mbo",  # Market-by-Order schema
                 start=str(start_date),
-                end=str(end_date),
-                fields=["ts_event", "price", "size", "side", "action", "order_id"]  # Explicitly include required fields
+                end=str(end_date)
             )
 
             # Convert to DataFrame
