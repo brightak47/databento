@@ -1,0 +1,4 @@
+streamlit==1.25.0       # Core library for building the app
+databento==1.2.0        # Databento API client for fetching historical data
+pandas==1.5.3           # For data processing and manipulation
+plotly==5.15.0          # For interactive visualizations
