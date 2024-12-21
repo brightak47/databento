@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import databento as db
+from datetime import timedelta
 
 # Streamlit App Title
 st.title("Order Book Imbalance Simulation Tool")
@@ -16,6 +17,30 @@ symbol = st.sidebar.text_input("Symbol (e.g., GC)", value="GC")
 start_date = st.sidebar.date_input("Start Date")
 end_date = st.sidebar.date_input("End Date")
 
+# Data chunk size (days) to optimize fetching
+chunk_size = 7  # Fetch data in 7-day chunks
+
+# Function to fetch data in chunks
+def fetch_data_in_chunks(client, dataset, symbol, start_date, end_date, schema):
+    all_data = []
+    current_start = start_date
+    while current_start <= end_date:
+        current_end = min(current_start + timedelta(days=chunk_size - 1), end_date)
+        st.write(f"Fetching data from {current_start} to {current_end}...")
+        try:
+            response = client.timeseries.get_range(
+                dataset=dataset,
+                symbols=[symbol],
+                schema=schema,
+                start=str(current_start),
+                end=str(current_end)
+            )
+            all_data.extend(response)
+        except Exception as e:
+            st.error(f"Error fetching data for {current_start} to {current_end}: {e}")
+        current_start = current_end + timedelta(days=1)
+    return all_data
+
 data_uploaded = False
 
 if api_key and symbol and start_date and end_date:
@@ -24,25 +49,25 @@ if api_key and symbol and start_date and end_date:
     fetch_data = st.sidebar.button("Fetch Data")
 
     if fetch_data:
-        st.write("Fetching data from Databento...")
-        
+        st.write("Initializing Databento client...")
         try:
             # Initialize Databento API client
             client = db.Historical(api_key)  # Pass the API key directly
-            
-            # Fetch data using the MBO schema
-            response = client.timeseries.get_range(
+
+            # Fetch data in chunks
+            raw_data = fetch_data_in_chunks(
+                client=client,
                 dataset="GLBX.MDP3",
-                symbols=[symbol],
-                schema="mbo",  # Market-by-Order schema
-                start=str(start_date),
-                end=str(end_date)
+                symbol=symbol,
+                start_date=start_date,
+                end_date=end_date,
+                schema="trades"
             )
 
             # Convert to DataFrame
-            data = pd.DataFrame(response)
+            data = pd.DataFrame(raw_data)
             data_uploaded = True
-            
+
             # Display fetched data
             st.write("Fetched Data:")
             st.dataframe(data.head())
@@ -51,13 +76,13 @@ if api_key and symbol and start_date and end_date:
             st.write("Columns in fetched data:", list(data.columns))
 
         except Exception as e:
-            st.error(f"Error fetching data: {e}")
+            st.error(f"Error initializing Databento client or fetching data: {e}")
 
 # If data is uploaded or fetched, process it
 if data_uploaded:
     # Process Data
     st.header("Data Processing")
-    
+
     # Check for 'ts_event' column
     if 'ts_event' in data.columns:
         data['ts_event'] = pd.to_datetime(data['ts_event'], unit='ns')
