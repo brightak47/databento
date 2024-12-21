@@ -30,13 +30,13 @@ if api_key and symbol and start_date and end_date:
             # Initialize Databento API client
             client = db.Historical(api_key)  # Pass the API key directly
             
-            # Fetch data
-            response = client.get_histogram(
+            # Fetch data using the timeseries API
+            response = client.timeseries.get_range(
                 dataset="GLBX.MDP3",
                 symbols=[symbol],
+                schema="trades",
                 start=str(start_date),
-                end=str(end_date),
-                fields=["ts_recv", "ts_event", "rtype", "publisher_id", "instrument_id", "action", "side", "price", "size", "sequence", "symbol"]
+                end=str(end_date)
             )
 
             # Convert to DataFrame
