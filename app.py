@@ -28,7 +28,8 @@ if api_key and symbol and start_date and end_date:
         
         try:
             # Initialize Databento API client
-            client = Historical(api_key=api_key)
+            client = Historical()
+            client.api_key = api_key  # Set the API key manually
             
             # Fetch data
             response = client.get_histogram(
