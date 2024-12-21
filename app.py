@@ -46,7 +46,10 @@ if api_key and symbol and start_date and end_date:
             # Display fetched data
             st.write("Fetched Data:")
             st.dataframe(data.head())
-        
+
+            # Debug: Show available columns
+            st.write("Columns in fetched data:", list(data.columns))
+
         except Exception as e:
             st.error(f"Error fetching data: {e}")
 
