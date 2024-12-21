@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from databento import Historical
+import databento as db
 
 # Streamlit App Title
 st.title("Order Book Imbalance Simulation Tool")
@@ -28,8 +28,7 @@ if api_key and symbol and start_date and end_date:
         
         try:
             # Initialize Databento API client
-            client = Historical()
-            client.api_key = api_key  # Set the API key manually
+            client = db.Historical(api_key)  # Pass the API key directly
             
             # Fetch data
             response = client.get_histogram(
