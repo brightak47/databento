@@ -2,120 +2,290 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import databento as db
-from datetime import timedelta
+from datetime import datetime, timedelta, date
 
-# Streamlit App Title
-st.title("Order Book Imbalance Simulation Tool")
-
-# Sidebar - API Key Input
-st.sidebar.header("API Configuration")
-api_key = st.sidebar.text_input("Enter your Databento API Key", type="password")
-
-# Sidebar - Data Parameters
-st.sidebar.header("Data Parameters")
-symbol = st.sidebar.text_input("Symbol (e.g., GC)", value="GC")
-start_date = st.sidebar.date_input("Start Date")
-end_date = st.sidebar.date_input("End Date")
-
-# Data chunk size (days) to optimize fetching
-chunk_size = 7  # Fetch data in 7-day chunks
-
-# Function to fetch data in chunks
-def fetch_data_in_chunks(client, dataset, symbol, start_date, end_date, schema):
-    all_data = []
+# -----------------------------------------------------------------------------
+# Helper Function: Split a date range into smaller (start, end) chunks
+# -----------------------------------------------------------------------------
+def chunk_date_range(start_date, end_date, chunk_size_days=7):
+    """
+    Splits the date range [start_date, end_date] into (start, end) tuples,
+    each covering up to chunk_size_days.
+    """
+    chunks = []
     current_start = start_date
-    while current_start <= end_date:
-        current_end = min(current_start + timedelta(days=chunk_size - 1), end_date)
-        st.write(f"Fetching data from {current_start} to {current_end}...")
-        try:
-            response = client.timeseries.get_range(
-                dataset=dataset,
-                symbols=[symbol],
-                schema=schema,
-                start=str(current_start),
-                end=str(current_end)
-            )
-            all_data.extend(response)
-        except Exception as e:
-            st.error(f"Error fetching data for {current_start} to {current_end}: {e}")
-        current_start = current_end + timedelta(days=1)
-    return all_data
+    while current_start < end_date:
+        next_end = current_start + timedelta(days=chunk_size_days)
+        if next_end > end_date:
+            next_end = end_date
+        chunks.append((current_start, next_end))
+        current_start = next_end + timedelta(days=1)
+    return chunks
+
+# -----------------------------------------------------------------------------
+# Per-Day Aggregator for Bid/Ask Volumes
+# -----------------------------------------------------------------------------
+class DailyAggregator:
+    """
+    Stores rolling bid_volume, ask_volume, last_price for each date.
+    Example usage:
+        aggregator = DailyAggregator()
+        aggregator.update(dateobj, side, size, action, price)
+        final_df = aggregator.to_dataframe()
+    """
+    def __init__(self):
+        # { date_obj: { 'bid_volume': float, 'ask_volume': float, 'price': float } }
+        self.daily_data = {}
+
+    def _ensure_date(self, dateobj):
+        if dateobj not in self.daily_data:
+            self.daily_data[dateobj] = {
+                "bid_volume": 0.0,
+                "ask_volume": 0.0,
+                "price": None  # last observed price
+            }
+
+    def update(self, dateobj, side, size, action, price):
+        """
+        Update volumes & price based on an event record.
+        side: 'Bid' or 'Ask'
+        action: Add, Cancel, Modify, Trade, Fill, clearBook, etc.
+        size: numeric
+        price: numeric (the most recent price)
+        """
+        self._ensure_date(dateobj)
+        day_info = self.daily_data[dateobj]
+
+        # Always update last price if we have a valid price
+        if price is not None:
+            day_info["price"] = float(price)
+
+        side = side.lower() if side else "none"
+        action = action.lower() if action else "none"
+        size = float(size or 0.0)
+
+        if action == "add":
+            if side == "bid":
+                day_info["bid_volume"] += size
+            elif side == "ask":
+                day_info["ask_volume"] += size
+
+        elif action in ("cancel", "trade", "fill"):
+            # Decrease volume from the side
+            if side == "bid":
+                day_info["bid_volume"] = max(0.0, day_info["bid_volume"] - size)
+            elif side == "ask":
+                day_info["ask_volume"] = max(0.0, day_info["ask_volume"] - size)
+
+        elif action == "modify":
+            # Naive approach: treat as "add" of new size. Real logic needs old size or IDs.
+            if side == "bid":
+                day_info["bid_volume"] += size
+            elif side == "ask":
+                day_info["ask_volume"] += size
+
+        elif action == "clearbook":
+            day_info["bid_volume"] = 0.0
+            day_info["ask_volume"] = 0.0
+        # action == "none" => do nothing
+
+    def to_dataframe(self):
+        """
+        Returns a DataFrame with columns: date, bid_volume, ask_volume, price
+        """
+        rows = []
+        for day, info in self.daily_data.items():
+            rows.append({
+                "date": day,
+                "bid_volume": info["bid_volume"],
+                "ask_volume": info["ask_volume"],
+                "price": info["price"],
+            })
+        df = pd.DataFrame(rows)
+        df.sort_values("date", inplace=True)
+        return df
+
+# -----------------------------------------------------------------------------
+# Streamlit App
+# -----------------------------------------------------------------------------
+st.title("Optimized Event‐Aware Imbalance Tool (with DBN encoding)")
+
+# Sidebar inputs
+st.sidebar.header("API Configuration")
+api_key = st.sidebar.text_input("Enter Databento API Key", type="password")
+
+st.sidebar.header("Symbol & Date Range")
+symbol_input = st.sidebar.text_input("Enter Symbol (e.g., GCG5)", value="GCG5")
+start_date = st.sidebar.date_input("Start Date", value=date(2025, 1, 1))
+end_date = st.sidebar.date_input("End Date", value=date(2025, 1, 15))
+
+if start_date >= end_date:
+    st.warning("Start date >= end date. Adjusting.")
+    end_date = start_date + timedelta(days=1)
+
+chunk_size_days = st.sidebar.number_input(
+    "Chunk size (days)",
+    min_value=1,
+    max_value=60,
+    value=7,
+    help="Split date range into chunks to reduce memory usage."
+)
+
+st.sidebar.header("CSV Upload (Optional)")
+uploaded_file = st.sidebar.file_uploader("Upload CSV File", type=["csv"])
+
+fetch_data = st.sidebar.button("Fetch Data from Databento")
 
 data_uploaded = False
+final_df = None  # Will store final daily EOD data
 
-if api_key and symbol and start_date and end_date:
-    # Fetch Historical Data using Databento API
-    st.sidebar.header("Fetch Historical Data")
-    fetch_data = st.sidebar.button("Fetch Data")
+# -----------------------------------------------------------------------------
+# 1) If CSV is uploaded, parse it
+# -----------------------------------------------------------------------------
+if uploaded_file:
+    try:
+        input_data = pd.read_csv(uploaded_file)
+        data_uploaded = True
+        st.write("CSV Data Loaded (raw):")
+        st.dataframe(input_data.head())
+    except Exception as e:
+        st.error(f"Error reading CSV file: {e}")
 
-    if fetch_data:
-        st.write("Initializing Databento client...")
+    # Process CSV data in aggregator if we have 'ts_event'
+    if data_uploaded:
+        if "ts_event" in input_data.columns:
+            input_data["ts_event"] = pd.to_datetime(input_data["ts_event"], errors="coerce")
+            input_data["date"] = input_data["ts_event"].dt.date
+            input_data.sort_values("ts_event", inplace=True)
+        else:
+            st.error("CSV missing 'ts_event' column, can't process events.")
+
+        aggregator = DailyAggregator()
+        for idx, row in input_data.iterrows():
+            d = row.get("date")
+            side = row.get("side", "None")
+            size = row.get("size", 0)
+            action = row.get("action", "None")
+            price = row.get("price", None)
+            aggregator.update(d, side, size, action, price)
+
+        final_df = aggregator.to_dataframe()
+        # Compute imbalance + price_change
+        final_df["imbalance"] = (
+            (final_df["bid_volume"] - final_df["ask_volume"]) /
+            (final_df["bid_volume"] + final_df["ask_volume"]).replace(0, pd.NA)
+        )
+        final_df["price_change"] = final_df["price"].astype(float).pct_change()
+        st.write("Daily Aggregated Data from CSV:")
+        st.dataframe(final_df)
+
+# -----------------------------------------------------------------------------
+# 2) Otherwise, fetch from Databento in chunks (with DBN encoding)
+# -----------------------------------------------------------------------------
+if fetch_data and api_key and not data_uploaded:
+    try:
+        st.write("Fetching data from Databento with DBN encoding in chunked mode...")
+
+        # Attempt symbology resolution (optional)
+        client = db.Historical(api_key)
+        resolved_symbol = symbol_input
         try:
-            # Initialize Databento API client
-            client = db.Historical(api_key)  # Pass the API key directly
-
-            # Fetch data in chunks
-            raw_data = fetch_data_in_chunks(
-                client=client,
+            res = client.symbology.resolve(
                 dataset="GLBX.MDP3",
-                symbol=symbol,
-                start_date=start_date,
-                end_date=end_date,
-                schema="mbo"  # Switching to Market-by-Order schema
+                symbols=[symbol_input],
+                stype_in="raw_symbol",
+                stype_out="instrument_id",
+                start_date=str(start_date)
             )
+            if len(res) > 0:
+                resolved_symbol = res[symbol_input]
+                st.write(f"Resolved symbol: {symbol_input} => {resolved_symbol}")
+            else:
+                st.warning("Could not resolve symbol. Using raw symbol directly.")
+        except Exception as e_sym:
+            st.warning(f"Symbology resolution failed, using raw symbol. Error: {e_sym}")
 
-            # Convert to DataFrame
-            data = pd.DataFrame(raw_data)
-            data_uploaded = True
+        # Create aggregator
+        aggregator = DailyAggregator()
 
-            # Display fetched data
-            st.write("Fetched Data:")
-            st.dataframe(data.head())
+        date_chunks = chunk_date_range(start_date, end_date, chunk_size_days)
+        chunk_progress = st.progress(0)
+        total_chunks = len(date_chunks)
 
-            # Debug: Show available columns
-            st.write("Columns in fetched data:", list(data.columns))
+        for i, (c_start, c_end) in enumerate(date_chunks):
+            st.write(f"Chunk {i+1}/{total_chunks}: {c_start} -> {c_end}")
 
-        except Exception as e:
-            st.error(f"Error initializing Databento client or fetching data: {e}")
+            # IMPORTANT: Here we specify encoding="dbn" to speed up retrieval
+            chunk_iter = client.timeseries.get_range(
+                dataset="GLBX.MDP3",
+                symbols=[resolved_symbol],
+                schema="mbo",
+                start=str(c_start),
+                end=str(c_end),
+                encoding="dbn"  # only works on older Databento clients (<1.0)
+            )
+            chunk_list = list(chunk_iter)
+            st.write(f"  -> Fetched {len(chunk_list)} records in this chunk.")
 
-# If data is uploaded or fetched, process it
-if data_uploaded:
-    # Process Data
-    st.header("Data Processing")
+            # Process each record on the fly
+            for rec in chunk_list:
+                action = getattr(rec, "action", None)
+                side = getattr(rec, "side", None)
+                size = getattr(rec, "size", 0)
+                price = getattr(rec, "price", None)
+                ts_event = getattr(rec, "ts_event", None)
 
-    # Check for 'ts_event' column
-    if 'ts_event' in data.columns:
-        data['ts_event'] = pd.to_datetime(data['ts_event'], unit='ns')
-        data['date'] = data['ts_event'].dt.date
-        eod_data = data.groupby('date').apply(lambda x: x.iloc[-1])
+                if ts_event is not None:
+                    dt = pd.to_datetime(ts_event, unit="ns", errors="coerce")
+                    d = dt.date()
+                else:
+                    d = None
 
-        # Calculate Imbalance
-        eod_data['bid_volume'] = eod_data.apply(lambda x: x['size'] if x['side'] == 'Bid' else 0, axis=1)
-        eod_data['ask_volume'] = eod_data.apply(lambda x: x['size'] if x['side'] == 'Ask' else 0, axis=1)
-        eod_data['imbalance'] = (eod_data['bid_volume'] - eod_data['ask_volume']) / (eod_data['bid_volume'] + eod_data['ask_volume'])
+                if d is not None:
+                    aggregator.update(d, side, size, action, price)
 
-        # Simulate Next-Day Price Impact (Assume we have next-day open prices in data)
-        eod_data['price_change'] = eod_data['price'].pct_change()
+            # Discard chunk_list
+            chunk_list = None
 
-        # Display Calculated Metrics
-        st.write("End-of-Day Data with Imbalance:")
-        st.dataframe(eod_data[['date', 'imbalance', 'price_change']])
+            # Update progress
+            chunk_progress.progress((i + 1) / total_chunks)
 
-        # Visualization
-        st.header("Visualization")
+        # Once all chunks are processed, build final daily data
+        final_df = aggregator.to_dataframe()
+        data_uploaded = True
+        st.write("All chunks processed. Daily Aggregated Data:")
 
-        # Scatter Plot - Imbalance vs. Price Change
-        st.subheader("Imbalance vs. Next-Day Price Change")
-        fig = px.scatter(eod_data, x="imbalance", y="price_change", title="Imbalance vs Price Change",
-                         labels={"imbalance": "Order Book Imbalance", "price_change": "Next-Day Price Change (%)"})
-        st.plotly_chart(fig)
+        # Compute imbalance + price_change
+        final_df["imbalance"] = (
+            (final_df["bid_volume"] - final_df["ask_volume"]) /
+            (final_df["bid_volume"] + final_df["ask_volume"]).replace(0, pd.NA)
+        )
+        final_df["price_change"] = final_df["price"].astype(float).pct_change()
+        st.dataframe(final_df)
 
-        # Correlation Analysis
-        correlation = eod_data[['imbalance', 'price_change']].corr().iloc[0, 1]
-        st.write(f"Correlation between Imbalance and Price Change: {correlation:.2f}")
+    except Exception as e:
+        st.error(f"Error fetching data: {e}")
+
+# -----------------------------------------------------------------------------
+# 3) Visualization & Correlation
+# -----------------------------------------------------------------------------
+if final_df is not None and data_uploaded:
+    st.header("Visualization")
+    fig = px.scatter(
+        final_df,
+        x="imbalance",
+        y="price_change",
+        title="Imbalance vs. Next-Day Price Change",
+        labels={"imbalance": "Order Book Imbalance", "price_change": "Next‐Day % Change"}
+    )
+    st.plotly_chart(fig)
+
+    valid_rows = final_df.dropna(subset=["imbalance", "price_change"])
+    if len(valid_rows) > 1:
+        corr_val = valid_rows[["imbalance", "price_change"]].corr().iloc[0, 1]
+        st.write(f"Correlation (Imbalance vs. Price Change): {corr_val:.2f}")
     else:
-        st.error("The 'ts_event' column is missing in the fetched data. Ensure the correct schema is used or contact Databento support.")
+        st.write("Insufficient data for correlation.")
 
-# Instructions
 if not data_uploaded:
-    st.info("Configure the API and fetch data to begin.")
+    st.info("Enter API key, symbol, date range, chunk size, then click 'Fetch Data' or upload a CSV file.")
